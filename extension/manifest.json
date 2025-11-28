@@ -1,1 +1,22 @@
-
+{
+    "manifest_version": 3,
+    "name": "PCF Sandbox Demo",
+    "version": "0.1",
+    "description": "Site A 로그인 후 PCF 샌드박스를 호출하는 확장입니다.",
+    "permissions": ["scripting"],
+    "host_permissions": [
+      "http://localhost:3000/*",
+      "http://localhost:4000/*"
+    ],
+    "background": {
+      "service_worker": "background.js"
+    },
+    "content_scripts": [
+      {
+        "matches": ["http://localhost:4000/*"],
+        "js": ["content.js"],
+        "run_at": "document_idle"
+      }
+    ]
+  }
+  
