@@ -10,7 +10,7 @@ const PORT = 3000;
 app.use(express.json());
 
 /**
- * 1단계: "간단한 메모리 DB" 준비
+ * 1단계: "메모리 DB" 준비
  *  - domains
  *  - loginEvents
  *  - deviceFingerprints
@@ -57,10 +57,12 @@ function getOrCreateDomain(domainName) {
 
 /**
  * 2단계: /evaluate_login 구현
- *  - 브라우저(JS)가 로그인 시점에 호출
+ *  - 서비스 서버가 로그인 시점에 PCF 백엔드를 호출
  *  - PCF가 login_event_id + domain_salt + run_sandbox 플래그 응답
+ *  - 서비스 서버는 이 값을 브라우저 응답에 포함시킴
  */
-app.post('/evaluate_login', (req, res) => {
+
+app.post('/evaluate_login', (req, res) => { 
   const { user_token, domain, login_ip } = req.body || {};
 
   // 필수값 체크
@@ -118,14 +120,14 @@ app.post('/report_fp', (req, res) => {
     local_classification,
   } = req.body || {};
 
-  // 필수값 체크
+  // 1. 필수값 체크
   if (!login_event_id || !domain || !safe_fp) {
     return res.status(400).json({
       error: 'login_event_id, domain, safe_fp are required',
     });
   }
 
-  // 1) login_event_id로 loginEvents에서 찾기
+  // 2. login_event_id로 loginEvents에서 찾기
   const loginEvent = loginEvents.get(login_event_id);
   if (!loginEvent) {
     return res.status(400).json({
@@ -133,7 +135,7 @@ app.post('/report_fp', (req, res) => {
     });
   }
 
-  // 2) 도메인 조회/생성 (있어야 domain_id 얻음)
+  // 3. 도메인 조회/생성 (있어야 domain_id 얻음)
   const domainRecord = getOrCreateDomain(domain);
 
   // 도메인 불일치 시 경고 (완전 막지는 않고 로그만)
@@ -146,7 +148,7 @@ app.post('/report_fp', (req, res) => {
 
   const now = new Date().toISOString();
 
-  // 3) deviceFingerprints upsert
+  // 4. deviceFingerprints upsert
   const fpKey = `${domainRecord.id}:${loginEvent.user_token}:${safe_fp}`;
   const existingFp = deviceFingerprints.get(fpKey);
 
@@ -165,14 +167,14 @@ app.post('/report_fp', (req, res) => {
   }
 
 
-// local_classification 안에서 is_bot, trust_score 꺼내기
+//5.  local_classification 안에서 is_bot, trust_score 꺼내기
   const is_bot = !!(local_classification && local_classification.is_bot);
   const trust_score =
     local_classification && typeof local_classification.trust_score === 'number'
       ? local_classification.trust_score
       : null;
 
-  // 4) sandboxReports 저장 (login_event_id 기준으로 1건이라고 가정)
+  // 6. sandboxReports 저장 (login_event_id 기준으로 1건이라고 가정)
   const report = {
     id: generateId(),
     login_event_id,
@@ -188,10 +190,10 @@ app.post('/report_fp', (req, res) => {
 
   sandboxReports.set(login_event_id, report);
 
-// 4-1) security_signal 기반 취약점 플래그 요약
+// 7. security_signal 기반 취약점 플래그 요약
 const vulnFlags = analyzeSecuritySignal(security_signal);
 
-// 5) 이 사용자에 대한 과거 히스토리/속도/IP 정보 계산
+// 8. 이 사용자에 대한 과거 히스토리/속도/IP 정보 계산
 const historyStats = getUserHistoryStats(loginEvent.user_token, domainRecord.id);
 const velocityStats = getUserLoginVelocity(
   loginEvent.user_token,
@@ -201,14 +203,14 @@ const velocityStats = getUserLoginVelocity(
 );
 const ipStats = getUserIpStats(loginEvent.user_token, domainRecord.id, loginEvent.login_ip);
 
-  // 6) 위험도(risk_score) 계산
+  // 9. 위험도(risk_score) 계산
   const risk_score = calculateRiskScore(local_classification, {
     history: historyStats,
     velocity: velocityStats,
     ip: ipStats,
   });
 
-   // 7) 서비스 서버에 보낼 payload 콘솔에 찍기 (실제 HTTP 호출은 나중에)
+   // 10. 서비스 서버에 보낼 payload 콘솔에 찍기 (실제 HTTP 호출은 나중에)
    const notifyPayload = {
     login_event_id,
     user_token: loginEvent.user_token,
@@ -228,7 +230,7 @@ const ipStats = getUserIpStats(loginEvent.user_token, domainRecord.id, loginEven
 
   notifyServiceServerSimulated(notifyPayload);
 
-  // 8) 클라이언트(브라우저 확장)에게 응답
+  // 11. 클라이언트(브라우저 확장)에게 응답
   return res.json({
     ok: true,
     message: 'sandbox report stored',
@@ -237,7 +239,7 @@ const ipStats = getUserIpStats(loginEvent.user_token, domainRecord.id, loginEven
 });
 
 /**
- * 사용자별 과거 샌드박스 히스토리 집계
+ * 사용자별 과거 샌드박스 히스토리 집계(3단계의 8번 계산 내용 구체화)
  * - 같은 user_token + domain_id 기준
  * - total: 총 샌드박스 실행 횟수
  * - botCount: is_bot == true 횟수
@@ -500,6 +502,42 @@ function notifyServiceServerSimulated(payload) {
   console.log(JSON.stringify(payload, null, 2));
   console.log('[PCF] ===========================================\n');
 }
+
+// ------------------------------
+// 🔍 디버그용 조회 API
+// ------------------------------
+
+// 1) 도메인 목록 조회
+app.get('/debug/domains', (req, res) => {
+    return res.json({
+      count: domains.size,
+      data: Array.from(domains.values())
+    });
+  });
+  
+  // 2) 로그인 이벤트 목록 조회
+  app.get('/debug/login_events', (req, res) => {
+    return res.json({
+      count: loginEvents.size,
+      data: Array.from(loginEvents.values())
+    });
+  });
+  
+  // 3) 샌드박스 리포트 목록 조회
+  app.get('/debug/sandbox_reports', (req, res) => {
+    return res.json({
+      count: sandboxReports.size,
+      data: Array.from(sandboxReports.values())
+    });
+  });
+  
+  // 4) 디바이스 핑거프린트 목록 조회
+  app.get('/debug/device_fp', (req, res) => {
+    return res.json({
+      count: deviceFingerprints.size,
+      data: Array.from(deviceFingerprints.values())
+    });
+  });
 
 // 서버 실행
 app.listen(PORT, () => {
