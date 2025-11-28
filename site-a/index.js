@@ -1,33 +1,34 @@
 // site-a/index.js
 
 const express = require('express');
+// Node 18+ 이면 fetch 내장이라 따로 node-fetch 필요 없음
 
 const app = express();
-const PORT = 4000;            // A사이트(서비스) 서버는 4000 포트
+const PORT = 4000;                       // Site A 서버 포트
 const PCF_BASE_URL = 'http://localhost:3000'; // PCF 백엔드 주소
 
-// 폼 데이터 파싱 (사용자가 username, password 받기 용)
+// 폼 데이터 파싱 (username / password 받기)
 app.use(express.urlencoded({ extended: true }));
-// JSON도 필요하면
 app.use(express.json());
 
 /**
- * 1) GET /  홈 페이지 (사이트 접속 시 맨 처음 화면)
+ * 1) GET /  → 사이트 A 홈
  */
 app.get('/', (req, res) => {
-    res.send(`
-      <html>
-        <body>
-          <h1>Welcome to Site A</h1>
-          <p>사이트A 입니다.</p>
-          <a href="/login"><button>로그인 하기</button></a>
-        </body>
-      </html>
-    `);
-  });
-  
+  res.send(`
+    <html>
+      <head><title>Site A - Home</title></head>
+      <body>
+        <h1>Welcome to Site A</h1>
+        <p>사이트 A 메인 페이지입니다.</p>
+        <a href="/login"><button>로그인 하기</button></a>
+      </body>
+    </html>
+  `);
+});
+
 /**
- * 2) GET /login  → 간단한 로그인 폼 HTML
+ * 2) GET /login  → 로그인 폼
  */
 app.get('/login', (req, res) => {
   const html = `
@@ -56,24 +57,21 @@ app.get('/login', (req, res) => {
 
 /**
  * 3) POST /login
- *  - (1)  username/password로 서비스 서버에서 로그인 검증 (로그인 성공으로 가정 해 진행)
- *  - (2) user_token / domain / login_ip 만들기
- *  - (3) PCF 백엔드의 /evaluate_login 호출
- *  - (4) PCf백엔드로 부터 응답으로 받은 login_event_id, domain_salt, run_sandbox를
- *       HTML 응답 안의 window.PCF_CONTEXT 에 심어서 브라우저로 전달
+ *  - 로그인 성공했다고 가정하고 PCF에 /evaluate_login 호출
+ *  - 응답(login_event_id, domain_salt 등)을 페이지에 심고
+ *  - content.js 와 HELLO ↔ CONTEXT 핸드셰이크
  */
 app.post('/login', async (req, res) => {
   const { username, password } = req.body || {};
 
-  // 1) (데모용) 서비스 서버 자체의 로그인 검증은 생략하고, 그냥 성공했다고 가정
+  // (데모용) username 없으면 에러, 있으면 무조건 로그인 성공
   if (!username) {
     return res.status(400).send('username is required');
   }
 
-  // 2) user_token, domain, login_ip 구성
-  const user_token = `user-${username}`;   // 데모용. 실제로는 DB ID나 UUID를 쓸 수 있음
-  const domain = 'a.com';                  // 이 서비스의 도메인 
-  const login_ip = req.ip || '1.2.3.4';    // 간단히 req.ip 사용 (프록시 뒤면 X-Forwarded-For 고려)
+  const user_token = `user-${username}`; // 실제라면 DB user id / UUID
+  const domain = 'a.com';
+  const login_ip = req.ip || '1.2.3.4';
 
   console.log('[Site-A] Login success for', username);
   console.log('[Site-A] Call PCF /evaluate_login with', {
@@ -82,7 +80,7 @@ app.post('/login', async (req, res) => {
     login_ip,
   });
 
-  // 3) PCF 백엔드 /evaluate_login 호출
+  // PCF /evaluate_login 호출
   let pcfResponseJson;
   try {
     const pcfResp = await fetch(`${PCF_BASE_URL}/evaluate_login`, {
@@ -116,7 +114,7 @@ app.post('/login', async (req, res) => {
     domain_salt,
   } = pcfResponseJson;
 
-  // 4) HTML 응답 안에 window.PCF_CONTEXT로 PCF 정보를 심어줌
+  // 로그인 후 페이지 HTML
   const html = `
     <html>
       <head><title>Site A - Home</title></head>
@@ -132,21 +130,40 @@ app.post('/login', async (req, res) => {
             run_sandbox,
             domain: pcfDomain,
             domain_salt,
+            user_token,
           },
           null,
           2
         )}</pre>
 
         <script>
-          // 브라우저 확장(샌드박스)이 참조할 컨텍스트
-          window.PCF_CONTEXT = {
-            login_event_id: ${JSON.stringify(login_event_id)},
-            run_sandbox: ${JSON.stringify(run_sandbox)},
-            domain: ${JSON.stringify(pcfDomain)},
-            domain_salt: ${JSON.stringify(domain_salt)},
-          };
+          (function() {
+            // 페이지에서 알고 있는 PCF 컨텍스트
+            const pcfContext = {
+              login_event_id: ${JSON.stringify(login_event_id)},
+              run_sandbox: ${JSON.stringify(run_sandbox)},
+              domain: ${JSON.stringify(pcfDomain)},
+              domain_salt: ${JSON.stringify(domain_salt)},
+              user_token: ${JSON.stringify(user_token)}
+            };
 
-          console.log('PCF_CONTEXT set:', window.PCF_CONTEXT);
+            console.log('PCF_CONTEXT set (page):', pcfContext);
+
+            // content.js 가 "HELLO" 를 보내면, 그때 PCF_CONTEXT 를 돌려준다
+            window.addEventListener('message', function(event) {
+              if (event.source !== window) return;
+              if (!event.data || event.data.type !== 'PCF_EXTENSION_HELLO') return;
+
+              console.log('PCF_EXTENSION_HELLO received, sending PCF_CONTEXT');
+              window.postMessage(
+                {
+                  type: 'PCF_CONTEXT',
+                  pcf: pcfContext
+                },
+                '*'
+              );
+            });
+          })();
         </script>
       </body>
     </html>
@@ -159,4 +176,3 @@ app.post('/login', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Site A server listening on http://localhost:${PORT}`);
 });
-
