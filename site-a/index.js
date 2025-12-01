@@ -1,7 +1,6 @@
 // site-a/index.js
 
 const express = require('express');
-// Node 18+ 이면 fetch 내장이라 따로 node-fetch 필요 없음
 
 const app = express();
 const PORT = 4000;                       // Site A 서버 포트
@@ -57,7 +56,7 @@ app.get('/login', (req, res) => {
 
 /**
  * 3) POST /login
- *  - 로그인 성공했다고 가정하고 PCF에 /evaluate_login 호출
+ *  - 로그인 성공 가정하에 PCF에 /evaluate_login 호출
  *  - 응답(login_event_id, domain_salt 등)을 페이지에 심고
  *  - content.js 와 HELLO ↔ CONTEXT 핸드셰이크
  */
@@ -82,6 +81,8 @@ app.post('/login', async (req, res) => {
 
   // PCF /evaluate_login 호출
   let pcfResponseJson;
+  let pcfRunSandboxHeader = null; // 🔹 PCF 헤더 저장용
+
   try {
     const pcfResp = await fetch(`${PCF_BASE_URL}/evaluate_login`, {
       method: 'POST',
@@ -92,6 +93,9 @@ app.post('/login', async (req, res) => {
         login_ip,
       }),
     });
+
+     //  PCF가 내려준 X-PCF-Run-Sandbox 헤더 읽기
+    pcfRunSandboxHeader = pcfResp.headers.get('x-pcf-run-sandbox');
 
     if (!pcfResp.ok) {
       const text = await pcfResp.text();
@@ -110,9 +114,19 @@ app.post('/login', async (req, res) => {
   const {
     login_event_id,
     run_sandbox,
-    domain: pcfDomain,
     domain_salt,
   } = pcfResponseJson;
+
+  console.log('[Site-A] PCF_CONTEXT for extension:', {
+    login_event_id,
+    run_sandbox,
+    domain_salt,
+  });
+
+  // 브라우저 응답 헤더에 PCF 헤더 그대로 전달
+  if (pcfRunSandboxHeader) {
+    res.set('X-PCF-Run-Sandbox', pcfRunSandboxHeader);
+  }
 
   // 로그인 후 페이지 HTML
   const html = `
@@ -123,33 +137,16 @@ app.post('/login', async (req, res) => {
 
         <p>로그인에 성공했습니다. 이제 PCF 샌드박스가 필요한 경우 브라우저 확장이 동작하게 됩니다.</p>
 
-        <h2>PCF Context (for extension)</h2>
-        <pre>${JSON.stringify(
-          {
-            login_event_id,
-            run_sandbox,
-            domain: pcfDomain,
-            domain_salt,
-            user_token,
-          },
-          null,
-          2
-        )}</pre>
-
         <script>
           (function() {
-            // 페이지에서 알고 있는 PCF 컨텍스트
             const pcfContext = {
               login_event_id: ${JSON.stringify(login_event_id)},
               run_sandbox: ${JSON.stringify(run_sandbox)},
-              domain: ${JSON.stringify(pcfDomain)},
-              domain_salt: ${JSON.stringify(domain_salt)},
-              user_token: ${JSON.stringify(user_token)}
+              domain_salt: ${JSON.stringify(domain_salt)}
             };
 
             console.log('PCF_CONTEXT set (page):', pcfContext);
 
-            // content.js 가 "HELLO" 를 보내면, 그때 PCF_CONTEXT 를 돌려준다
             window.addEventListener('message', function(event) {
               if (event.source !== window) return;
               if (!event.data || event.data.type !== 'PCF_EXTENSION_HELLO') return;
