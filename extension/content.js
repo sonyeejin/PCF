@@ -47,8 +47,83 @@ function buildRawFingerprint() {
       null,
   };
 
+  const touch = {
+    hasTouch:
+      "ontouchstart" in window || (navigator.maxTouchPoints || 0) > 0,
+    maxTouchPoints: navigator.maxTouchPoints || 0,
+  };
+
   const privacy = {
     doNotTrack: navigator.doNotTrack || null,
+  };
+
+  // storage 지원 여부만 간단 체크 (실제 용량/쓰기 테스트는 생략)
+  const storage = {
+    localStorage: (() => {
+      try {
+        return !!window.localStorage;
+      } catch (e) {
+        return false;
+      }
+    })(),
+    sessionStorage: (() => {
+      try {
+        return !!window.sessionStorage;
+      } catch (e) {
+        return false;
+      }
+    })(),
+    indexedDB: typeof indexedDB !== "undefined",
+  };
+
+  // permissions API는 비동기라 여기서는 존재 여부만
+  const permissions = {
+    hasPermissionsApi: !!(navigator.permissions && navigator.permissions.query),
+  };
+
+  const mediaDevices = {
+    hasMediaDevices:
+      !!(navigator.mediaDevices && navigator.mediaDevices.enumerateDevices),
+    deviceCount: null, // 실제 개수는 비동기라 여기선 생략
+  };
+
+  // 간단 WebGL 지원 여부
+  let webglSupported = false;
+  try {
+    const canvas = document.createElement("canvas");
+    const gl =
+      canvas.getContext("webgl") ||
+      canvas.getContext("experimental-webgl");
+    webglSupported = !!gl;
+  } catch (e) {
+    webglSupported = false;
+  }
+  const webgl = {
+    supported: webglSupported,
+  };
+
+  // Canvas 렌더링 지원 여부만 체크 
+  let canvasSupported = false;
+  try {
+    const canvasEl = document.createElement("canvas");
+    canvasSupported = !!canvasEl.getContext("2d");
+  } catch (e) {
+    canvasSupported = false;
+  }
+  const canvas = {
+    supported: canvasSupported,
+  };
+
+  const audio = {
+    hasOfflineAudioContext: !!(
+      window.OfflineAudioContext || window.webkitOfflineAudioContext
+    ),
+  };
+
+  // 실제 폰트 fingerprinting은 복잡하니 placeholder만
+  const fonts = {
+    // TODO: 필요하면 테스트 문자열 기반 폰트 설치 여부 측정 로직 추가
+    placeholder: true,
   };
 
   return {
@@ -56,7 +131,15 @@ function buildRawFingerprint() {
     device,
     screen: screenInfo,
     time,
+    touch,
     privacy,
+    storage,
+    permissions,
+    mediaDevices,
+    webgl,
+    canvas,
+    audio,
+    fonts,
   };
 }
 
@@ -126,10 +209,12 @@ function computeLocalClassification(raw_fp, security_signal) {
   const privacy = raw_fp.privacy || {};
   const doNotTrack = privacy.doNotTrack;
 
+  // 브라우저 메이저 버전이 너무 낮으면 감점
   if (typeof bm === 'number' && bm < 100) {
     trust_score -= 20;
   }
 
+  // 구식 OS 감점
   if (os.includes('windows 7') || os.includes('vista') || os.includes('xp')) {
     trust_score -= 20;
   }
@@ -143,6 +228,7 @@ function computeLocalClassification(raw_fp, security_signal) {
     }
   }
 
+  // CPU 코어 수가 너무 많거나 알 수 없을 때
   if (typeof hwThreads === 'number') {
     if (hwThreads >= 32) {
       trust_score -= 10;
@@ -151,14 +237,17 @@ function computeLocalClassification(raw_fp, security_signal) {
     trust_score -= 5;
   }
 
+  // 언어 정보가 비어있으면 비정상 환경으로 감점
   if (!languages || languages.length === 0) {
     trust_score -= 10;
   }
 
+  // DNT 켜져 있으면 약간 감점 (프라이버시 강한 설정)
   if (doNotTrack === '1') {
     trust_score -= 5;
   }
 
+  // webdriver 감지 → 강한 봇 신호
   if (navigator.webdriver) {
     trust_score -= 40;
   }
@@ -166,6 +255,7 @@ function computeLocalClassification(raw_fp, security_signal) {
   if (trust_score < 0) trust_score = 0;
   if (trust_score > 100) trust_score = 100;
 
+  // 일정 이하 점수이거나 webdriver면 is_bot=true
   if (trust_score <= 30 || navigator.webdriver) {
     is_bot = true;
   }
@@ -177,7 +267,7 @@ function computeLocalClassification(raw_fp, security_signal) {
 // 5. 샌드박스 실행 (PCF 컨텍스트 필요)
 // -----------------------
 async function runSandboxIfNeeded() {
-  console.log('[PCF Extension] content.js loaded on', window.location.href);
+  console.log('[PCF Extension] content.js runSandboxIfNeeded on', window.location.href);
 
   const ctx = pcfContext;
   if (!ctx) {
@@ -195,25 +285,32 @@ async function runSandboxIfNeeded() {
   const raw_fp = buildRawFingerprint();
   console.log('[PCF Extension] raw_fp:', raw_fp);
 
+  
+  // safe_fp = SHA-256(JSON.stringify(raw_fp) + domain_salt)
   const rawString = JSON.stringify(raw_fp);
-  const salted = String(ctx.domain_salt || '') + '|' + rawString;
-  const fullHex = await sha256Hex(salted);
-  const safe_fp = 'fp-' + fullHex.slice(0, 32);
+  const domainSalt = String(ctx.domain_salt || '');
+  const hashInput = rawString + domainSalt;
+  const safe_fp = await sha256Hex(hashInput);
 
   const security_signal = buildSecuritySignal(raw_fp);
   const local_classification = computeLocalClassification(raw_fp, security_signal);
 
+  // /report_fp로 보낼 payload
+  // - login_event_id, safe_fp, security_signal, local_classification
   const payload = {
     login_event_id: ctx.login_event_id,
-    domain: ctx.domain,
     safe_fp,
-    local_classification,
     security_signal,
+    local_classification,
   };
 
   console.log('[PCF Extension] /report_fp payload 준비:', payload);
 
-  if (chrome && chrome.runtime && chrome.runtime.sendMessage) {
+  if (
+    typeof chrome !== 'undefined' &&
+    chrome.runtime &&
+    chrome.runtime.sendMessage
+  ) {
     chrome.runtime.sendMessage(
       {
         type: 'PCF_REPORT_FP',
@@ -252,11 +349,11 @@ console.log('[PCF Extension] content.js loaded on', window.location.href);
 
 // 8. 페이지에 "나 준비됨" 신호 보내기
 try {
-    window.postMessage(
-      {type: 'PCF_EXTENSION_HELLO'},
-      '*'
-    );
-    console.log('[PCF Extension] PCF_EXTENSION_HELLO 전송');
-  } catch (e) {
-    console.error('[PCF Extension] HELLO 전송 실패:', e);
-  }
+  window.postMessage(
+    { type: 'PCF_EXTENSION_HELLO' },
+    '*'
+  );
+  console.log('[PCF Extension] PCF_EXTENSION_HELLO 전송');
+} catch (e) {
+  console.error('[PCF Extension] HELLO 전송 실패:', e);
+}
