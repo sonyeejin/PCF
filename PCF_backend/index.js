@@ -106,7 +106,6 @@ app.post('/evaluate_login', (req, res) => {
   return res.json({
     login_event_id,
     run_sandbox: true,
-    domain: domainRecord.domain_name,
     domain_salt: domainRecord.domain_salt,
   });
 });
@@ -124,16 +123,15 @@ app.post('/evaluate_login', (req, res) => {
 app.post('/report_fp', (req, res) => {
   const {
     login_event_id,
-    domain,
     safe_fp,
     security_signal,
     local_classification,
   } = req.body || {};
 
   // 필수값 체크
-  if (!login_event_id || !domain || !safe_fp) {
+  if (!login_event_id || !safe_fp) {
     return res.status(400).json({
-      error: 'login_event_id, domain, safe_fp are required',
+      error: 'login_event_id and safe_fp are required',
     });
   }
 
@@ -144,9 +142,25 @@ app.post('/report_fp', (req, res) => {
       error: 'unknown login_event_id',
     });
   }
-
-  // 2) 도메인 조회/생성 (있어야 domain_id 얻음)
-  const domainRecord = getOrCreateDomain(domain);
+  function getDomainById(domainId) {
+    for (const record of domains.values()) {
+      if (record.id === domainId) {
+        return record;
+      }
+    }
+    return null;
+  }  
+  // 2) PCF 백엔드 내부에서 domain 찾기 (브라우저는 domain 안 보냄)
+  const domainRecord = getDomainById(loginEvent.domain_id);
+  if (!domainRecord) {
+    console.warn('[PCF] WARNING: domain not found for login_event', {
+      login_event_id,
+      domain_id: loginEvent.domain_id,
+    });
+    return res.status(500).json({
+      error: 'domain not found for login_event',
+    });
+  }
 
   // 도메인 불일치 시 경고 (완전 막지는 않고 로그만)
   if (domainRecord.id !== loginEvent.domain_id) {
@@ -227,7 +241,8 @@ app.post('/report_fp', (req, res) => {
   const geoStats = getUserCountryStats(
     loginEvent.user_token,
     domainRecord.id,
-    loginEvent.country || null
+    loginEvent.country || null,
+    login_event_id
   );
 
   // 6) 위험도(risk_score) 계산
@@ -239,7 +254,7 @@ app.post('/report_fp', (req, res) => {
     geo: geoStats,
   });
 
-  // 7) 서비스 서버에 보낼 payload 콘솔에 찍기 (실제 HTTP 호출은 나중에)
+  // 7) 서비스 서버에 보낼 payload 콘솔로 확인하기 (실제 HTTP 호출은 나중에)
   const notifyPayload = {
     login_event_id,
     user_token: loginEvent.user_token,
@@ -364,7 +379,7 @@ function getUserIpStats(user_token, domain_id, currentIp) {
  * - domain_id + safe_fp 기준
  * - 해당 safe_fp에서 로그인한 서로 다른 user_token 개수
  */
-function getFpMultiAccountStats(domain_id, safe_fp, currentUserToken) {
+function getFpMultiAccountStats(domain_id, safe_fp) {
   if (!safe_fp) {
     return {
     hasFp: false,
@@ -392,10 +407,13 @@ function getFpMultiAccountStats(domain_id, safe_fp, currentUserToken) {
  * - 과거에 어떤 country에서 로그인했는지
  * - 이번 country가 "처음 보는 국가"인지 여부
  */
-function getUserCountryStats(user_token, domain_id, currentCountry) {
+function getUserCountryStats(user_token, domain_id, currentCountry, currentLoginEventId) {
   const countrySet = new Set();
 
-  for (const evt of loginEvents.values()) {
+  for (const [login_event_id, evt] of loginEvents.entries()) {
+    if (login_event_id === currentLoginEventId) {
+      continue; // 이번 이벤트는 건너뛴다
+    }
     if (evt.user_token === user_token && evt.domain_id === domain_id) {
       if (evt.country) {
         countrySet.add(evt.country);
@@ -406,11 +424,8 @@ function getUserCountryStats(user_token, domain_id, currentCountry) {
   const hasGeoHistory = countrySet.size > 0;
 
   let isNewCountry = false;
-  if (currentCountry) {
-    if (!countrySet.has(currentCountry) && hasGeoHistory) {
-      // 과거 히스토리가 있는데, 이번 country가 처음 등장
-      isNewCountry = true;
-    }
+  if (currentCountry && hasGeoHistory && !countrySet.has(currentCountry)) {
+    isNewCountry = true;
   }
 
   return {
@@ -420,7 +435,7 @@ function getUserCountryStats(user_token, domain_id, currentCountry) {
     isNewCountry,
   };
 }
-
+  
 /**
  * security_signal을 보고 취약점 플래그 요약
  * - outdated_browser : 브라우저 메이저 버전이 너무 낮음 (Chrome 전제)
