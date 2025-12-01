@@ -142,6 +142,7 @@ app.post('/report_fp', (req, res) => {
       error: 'unknown login_event_id',
     });
   }
+
   function getDomainById(domainId) {
     for (const record of domains.values()) {
       if (record.id === domainId) {
@@ -149,7 +150,8 @@ app.post('/report_fp', (req, res) => {
       }
     }
     return null;
-  }  
+  }
+
   // 2) PCF 백엔드 내부에서 domain 찾기 (브라우저는 domain 안 보냄)
   const domainRecord = getDomainById(loginEvent.domain_id);
   if (!domainRecord) {
@@ -222,7 +224,7 @@ app.post('/report_fp', (req, res) => {
     loginEvent.user_token,
     domainRecord.id,
     now,
-    10, // 최근 10분 기준
+    10, // 최근 10분 기준 (로그인 속도)
   );
   const ipStats = getUserIpStats(
     loginEvent.user_token,
@@ -230,19 +232,19 @@ app.post('/report_fp', (req, res) => {
     loginEvent.login_ip
   );
 
-  // 🔹 5-1) 같은 디바이스(safe_fp)에서 여러 계정 시도 여부
+  // 🔹 5-1) 같은 디바이스(safe_fp)에서 여러 계정 시도 여부 (최근 5분)
   const multiFpStats = getFpMultiAccountStats(
     domainRecord.id,
     safe_fp,
-    loginEvent.user_token
+    now
   );
 
-  // 🔹 5-2) 국가/지역 변화 정보
+  // 🔹 5-2) 국가/지역 변화 정보 (현재 이벤트 제외하고 과거만 봄)
   const geoStats = getUserCountryStats(
     loginEvent.user_token,
     domainRecord.id,
     loginEvent.country || null,
-    login_event_id
+    login_event_id            // 🔹 현재 이벤트 id 넘겨주기
   );
 
   // 6) 위험도(risk_score) 계산
@@ -377,27 +379,42 @@ function getUserIpStats(user_token, domain_id, currentIp) {
 /**
  * 같은 디바이스(safe_fp)에서 여러 계정(user_token)으로 시도하는지 여부
  * - domain_id + safe_fp 기준
- * - 해당 safe_fp에서 로그인한 서로 다른 user_token 개수
+ * - "최근 5분" 안에 이 safe_fp로 로그인한 서로 다른 user_token 개수
  */
-function getFpMultiAccountStats(domain_id, safe_fp) {
+function getFpMultiAccountStats(domain_id, safe_fp, nowIso) {
+  const windowMinutes = 5;                // 🔹 multi-account 규칙: 최근 5분
+  const now = new Date(nowIso).getTime();
+  const windowMs = windowMinutes * 60 * 1000;
+
   if (!safe_fp) {
     return {
-    hasFp: false,
-    distinctUsers: 0,
+      hasFp: false,
+      distinctUsers: 0,
+      windowMinutes,
     };
   }
 
   const userSet = new Set();
+  let hasAnyFp = false;
 
   for (const fp of deviceFingerprints.values()) {
     if (fp.domain_id === domain_id && fp.safe_fp === safe_fp) {
-      userSet.add(fp.user_token);
+      hasAnyFp = true;
+
+      if (fp.last_seen_at) {
+        const t = new Date(fp.last_seen_at).getTime();
+        if (!Number.isNaN(t) && now - t <= windowMs) {
+          // 최근 5분 안에 본 적 있는 user_token만 카운트
+          userSet.add(fp.user_token);
+        }
+      }
     }
   }
 
   return {
-    hasFp: true,
-    distinctUsers: userSet.size,
+    hasFp: hasAnyFp,              // 이 safe_fp 히스토리가 있는지 여부
+    distinctUsers: userSet.size,  // 최근 5분 안의 서로 다른 user_token 수
+    windowMinutes,
   };
 }
 
@@ -406,6 +423,7 @@ function getFpMultiAccountStats(domain_id, safe_fp) {
  * - 같은 user_token + domain_id 기준
  * - 과거에 어떤 country에서 로그인했는지
  * - 이번 country가 "처음 보는 국가"인지 여부
+ *   (이번 login_event_id는 히스토리에서 제외)
  */
 function getUserCountryStats(user_token, domain_id, currentCountry, currentLoginEventId) {
   const countrySet = new Set();
@@ -435,7 +453,7 @@ function getUserCountryStats(user_token, domain_id, currentCountry, currentLogin
     isNewCountry,
   };
 }
-  
+
 /**
  * security_signal을 보고 취약점 플래그 요약
  * - outdated_browser : 브라우저 메이저 버전이 너무 낮음 (Chrome 전제)
@@ -596,8 +614,8 @@ function calculateRiskScore(localClassification, stats) {
   }
 
   // 5) 같은 safe_fp(디바이스)에서 여러 계정(user_token) 시도
-  if (multiFp.hasFp && multiFp.distinctUsers >= 2) {
-    // 같은 디바이스로 여러 계정을 돌림 → multi-account 의심
+  //    🔹 규칙: 최근 5분 안에 서로 다른 계정 3개 이상이면 위험 증가
+  if (multiFp.hasFp && multiFp.distinctUsers >= 3) {
     score += 0.2;
   }
 
