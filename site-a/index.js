@@ -51,8 +51,11 @@ app.get('/login', (req, res) => {
  *  - 로그인 성공 후 PCF /evaluate_login 호출
  *  - 보고서 스펙대로 user_token, domain, login_ip 만 전달
  *  - 응답(login_event_id, domain_salt, run_sandbox)을
- *      1) HTTP 헤더에 넣고
- *      2) 페이지에서 window.postMessage로 확장에 보냄
+ *      1) HTTP 헤더에는 **X-PCF-Run-Sandbox 하나만** 넣어서
+ *         확장이 "샌드박스 실행 여부"만 판단하도록 하고
+ *      2) 페이지 PCF_CONTEXT(본문 스크립트) 안에
+ *         login_event_id, domain_salt, run_sandbox 를 전부 넣어
+ *         content script가 /report_fp 계산에 사용하도록 함
  *  - ❗ 페이지 PCF_CONTEXT에는 domain 넣지 않음 (요청 받은 대로)
  */
 app.post('/login', async (req, res) => {
@@ -62,7 +65,7 @@ app.post('/login', async (req, res) => {
     return res.status(400).send('username is required');
   }
 
-  const user_token = `user-${username}`; 
+  const user_token = `user-${username}`;
   const domain = SITE_DOMAIN;
   const login_ip = req.ip || '127.0.0.1';
 
@@ -113,13 +116,13 @@ app.post('/login', async (req, res) => {
   });
 
   // ---------- (A) HTTP 헤더 전달 ----------
+  // 🔹 헤더에는 X-PCF-Run-Sandbox 하나만 넣는다.
   res.set('X-PCF-Run-Sandbox', runSandboxBool ? '1' : '0');
-  res.set('X-PCF-Login-Event-Id', String(login_event_id));
-  res.set('X-PCF-Domain-Salt', String(domain_salt));
 
-  // domain은 헤더에는 필요하다면 넣어도 되지만,
-  // 페이지 PCF_CONTEXT에는 절대 넣지 않는다 (요청 사항)
-  res.set('X-PCF-Domain', domain);
+  // 🔸 더 이상 아래 헤더들은 보내지 않음:
+  // res.set('X-PCF-Login-Event-Id', String(login_event_id));
+  // res.set('X-PCF-Domain-Salt', String(domain_salt));
+  // res.set('X-PCF-Domain', domain);
 
   // ---------- (B) 페이지 PCF_CONTEXT ----------
   // domain 없음
@@ -161,7 +164,6 @@ app.post('/login', async (req, res) => {
 
   return res.send(html);
 });
-
 
 app.listen(PORT, () => {
   console.log(`Site A server running at http://localhost:${PORT}`);
