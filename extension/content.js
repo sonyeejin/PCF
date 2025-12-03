@@ -186,69 +186,173 @@ function buildSecuritySignal(raw_fp) {
 }
 
 // -----------------------
-// 4. local_classification 계산
+// 4. local_classification 계산 
 // -----------------------
 function computeLocalClassification(raw_fp, security_signal) {
+  // 초기 점수
   let trust_score = 80;
   let is_bot = false;
 
-  const bm = security_signal.browser_major;
-  const os = (security_signal.os_major || '').toLowerCase();
+  // UA / OS / 브라우저 버전
+  const ua =
+    (raw_fp &&
+      raw_fp.browser &&
+      typeof raw_fp.browser.userAgent === 'string' &&
+      raw_fp.browser.userAgent) ||
+    navigator.userAgent;
+  const uaLower = String(ua).toLowerCase();
+
+  const browser_major =
+    security_signal && typeof security_signal.browser_major === 'number'
+      ? security_signal.browser_major
+      : null;
+
+  const osStr = String(
+    (security_signal && security_signal.os_major) || ''
+  ).toLowerCase();
 
   const device = raw_fp.device || {};
   const hwThreads = device.hardwareConcurrency;
+
   const browser = raw_fp.browser || {};
   const languages = browser.languages || [];
+
   const privacy = raw_fp.privacy || {};
   const doNotTrack = privacy.doNotTrack;
 
-  // 브라우저 메이저 버전이 너무 낮으면 감점
-  if (typeof bm === 'number' && bm < 100) {
-    trust_score -= 20;
+  const storage = raw_fp.storage || {};
+  const mediaDevices = raw_fp.mediaDevices || {};
+
+  // -----------------------
+  // (1) 강한 bot 신호 체크 → is_bot = true면 trust_score -60
+  // -----------------------
+  let strongBotSignal = false;
+
+  // 1) webdriver 플래그
+  if (navigator.webdriver) {
+    strongBotSignal = true;
   }
 
-  // 구식 OS 감점
-  if (os.includes('windows 7') || os.includes('vista') || os.includes('xp')) {
-    trust_score -= 20;
+  // 2) UA에 headless/selenium/puppeteer/... 키워드 포함
+  if (!strongBotSignal) {
+    const botKeywords = [
+      'headless',
+      'selenium',
+      'puppeteer',
+      'playwright',
+      'phantomjs',
+      'bot',
+      'spider',
+      'crawler',
+    ];
+    for (const kw of botKeywords) {
+      if (uaLower.includes(kw)) {
+        strongBotSignal = true;
+        break;
+      }
+    }
   }
-  if (os.startsWith('macos')) {
-    const m = os.match(/macos\s+(\d+)/);
+
+  // 3) 창 크기가 0인 비정상 환경
+  if (
+    !strongBotSignal &&
+    (window.outerWidth === 0 || window.outerHeight === 0)
+  ) {
+    strongBotSignal = true;
+  }
+
+  // 4) 미디어/스토리지가 모두 막힌 것처럼 보이는 경우
+  if (!strongBotSignal) {
+    const storageBlocked =
+      storage.localStorage === false &&
+      storage.sessionStorage === false &&
+      storage.indexedDB === false;
+    const mediaBlocked = mediaDevices.hasMediaDevices === false;
+
+    if (storageBlocked && mediaBlocked) {
+      strongBotSignal = true;
+    }
+  }
+
+  if (strongBotSignal) {
+    trust_score -= 60;
+    is_bot = true;
+  }
+
+  // -----------------------
+  // (2) 기타 신호들: 각각 -10점씩
+  //    - plugins/languages/storage, DNT, CPU 코어 비정상 등
+  // -----------------------
+
+  // 언어 정보 없음
+  if (!languages || languages.length === 0) {
+    trust_score -= 10;
+  }
+
+  // DNT 켜져 있음
+  if (doNotTrack === '1') {
+    trust_score -= 10;
+  }
+
+  // CPU 코어 정보 비정상 (없거나 너무 많음)
+  if (typeof hwThreads !== 'number' || hwThreads >= 32) {
+    trust_score -= 10;
+  }
+
+  // 스토리지 중 하나라도 비활성화(비정상)처럼 보이면 -10
+  const storageWeird =
+    storage.localStorage === false ||
+    storage.sessionStorage === false ||
+    storage.indexedDB === false;
+  if (storageWeird) {
+    trust_score -= 10;
+  }
+
+  // -----------------------
+  // (3) 구버전 브라우저 (major < 100) → -10점
+  // -----------------------
+  if (typeof browser_major === 'number' && browser_major < 100) {
+    trust_score -= 10;
+  }
+
+  // -----------------------
+  // (4) 구버전 OS (Win7, OS X 10.x 등) → -10점
+  // -----------------------
+  if (
+    osStr.includes('windows 7') ||
+    osStr.includes('windows xp') ||
+    osStr.includes('vista')
+  ) {
+    trust_score -= 10;
+  } else if (osStr.startsWith('macos')) {
+    const m = osStr.match(/macos\s+(\d+)/);
     if (m) {
       const major = parseInt(m[1], 10);
-      if (major < 11) {
+      if (major <= 10) {
+        // macOS 10.x 계열은 구버전 취급
         trust_score -= 10;
       }
     }
   }
 
-  // CPU 코어 수가 너무 많거나 알 수 없을 때
-  if (typeof hwThreads === 'number') {
-    if (hwThreads >= 32) {
-      trust_score -= 10;
-    }
-  } else {
-    trust_score -= 5;
-  }
-
-  // 언어 정보 없음 → 감점
-  if (!languages || languages.length === 0) {
+  // -----------------------
+  // (5) 샌드박스 security_version 미준수 → -10점
+  //     - "v1.x" 형태만 최신
+  //     - "v0.x" 이거나 버전 누락/이상 → 구버전
+  // -----------------------
+  const ver = security_signal && security_signal.security_version;
+  if (typeof ver !== 'string' || !ver.startsWith('v1.')) {
     trust_score -= 10;
   }
 
-  // DNT 켜져 있으면 약간 감점
-  if (doNotTrack === '1') {
-    trust_score -= 5;
-  }
-
-  // webdriver 감지 → 봇 강한 신호
-  if (navigator.webdriver) {
-    trust_score -= 40;
-  }
-
+  // -----------------------
+  // (6) 0~100 범위로 클램프 + 추가 is_bot 판정
+  // -----------------------
   if (trust_score < 0) trust_score = 0;
   if (trust_score > 100) trust_score = 100;
 
-  if (trust_score <= 30 || navigator.webdriver) {
+  // 강한 bot 신호가 아니더라도, 점수가 너무 낮으면 봇으로 간주
+  if (!is_bot && trust_score <= 30) {
     is_bot = true;
   }
 
