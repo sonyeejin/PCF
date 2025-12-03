@@ -50,13 +50,11 @@ app.get('/login', (req, res) => {
  * POST /login
  *  - 로그인 성공 후 PCF /evaluate_login 호출
  *  - 보고서 스펙대로 user_token, domain, login_ip 만 전달
- *  - 응답(login_event_id, domain_salt, run_sandbox)을
- *      1) HTTP 헤더에는 **X-PCF-Run-Sandbox 하나만** 넣어서
- *         확장이 "샌드박스 실행 여부"만 판단하도록 하고
- *      2) 페이지 PCF_CONTEXT(본문 스크립트) 안에
- *         login_event_id, domain_salt, run_sandbox 를 전부 넣어
- *         content script가 /report_fp 계산에 사용하도록 함
- *  - ❗ 페이지 PCF_CONTEXT에는 domain 넣지 않음 (요청 받은 대로)
+ *  - PCF 백엔드는 login_event_id, domain_salt, run_sandbox 를
+ *    전부 응답 헤더(X-PCF-*)에 넣어서 돌려줌 (JSON 바디는 옵션)
+ *  - 이 서비스 서버는 그 헤더들을 "재구성 없이" 그대로 복사해서
+ *    브라우저 응답 헤더로 전달
+ *  - HTML 본문은 단순 로그인 성공 페이지만 내려보냄
  */
 app.post('/login', async (req, res) => {
   const { username } = req.body || {};
@@ -69,95 +67,71 @@ app.post('/login', async (req, res) => {
   const domain = SITE_DOMAIN;
   const login_ip = req.ip || '127.0.0.1';
 
-  console.log('[Site-A] Call /evaluate_login with (REPORT SPEC ONLY):', {
+  console.log('[Site-A] Call /evaluate_login (headers-only mode):', {
     user_token,
     domain,
     login_ip
   });
 
   // ---------- PCF /evaluate_login ----------
-  let pcfResponseJson;
+  let pcfResp;
   try {
-    const pcfResp = await fetch(`${PCF_BASE_URL}/evaluate_login`, {
+    pcfResp = await fetch(`${PCF_BASE_URL}/evaluate_login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         user_token,
         domain,
-        login_ip
-      })
+        login_ip,
+      }),
     });
-
-    if (!pcfResp.ok) {
-      const errText = await pcfResp.text();
-      console.error('[Site-A] PCF error:', pcfResp.status, errText);
-      return res.status(500).send('PCF evaluate_login failed');
-    }
-
-    pcfResponseJson = await pcfResp.json();
   } catch (err) {
     console.error('[Site-A] Error calling PCF:', err);
     return res.status(500).send('Failed to call PCF backend');
   }
 
-  const { login_event_id, domain_salt, run_sandbox } = pcfResponseJson || {};
-
-  if (!login_event_id || domain_salt === undefined) {
-    console.error('[Site-A] Invalid PCF response:', pcfResponseJson);
-    return res.status(500).send('Invalid PCF evaluate_login response');
+  if (!pcfResp.ok) {
+    const errText = await pcfResp.text().catch(() => '(no body)');
+    console.error('[Site-A] PCF error:', pcfResp.status, errText);
+    return res.status(500).send('PCF evaluate_login failed');
   }
 
-  const runSandboxBool = Boolean(run_sandbox);
+  // ---------- PCF 응답 헤더에서 값 읽기 ----------
+  const pcfHeaders = pcfResp.headers;
+  const login_event_id = pcfHeaders.get('X-PCF-Login-Event-Id');
+  const domain_salt    = pcfHeaders.get('X-PCF-Domain-Salt');
+  const run_sandbox    = pcfHeaders.get('X-PCF-Run-Sandbox');
 
-  console.log('[Site-A] PCF_CONTEXT → extension:', {
+
+  console.log('[Site-A] PCF headers from backend:', {
     login_event_id,
-    run_sandbox: runSandboxBool,
-    domain_salt
+    domain_salt,
+    run_sandbox,
   });
 
-  // ---------- (A) HTTP 헤더 전달 ----------
-  // 🔹 헤더에는 X-PCF-Run-Sandbox 하나만 넣는다.
-  res.set('X-PCF-Run-Sandbox', runSandboxBool ? '1' : '0');
+  // 필수 헤더가 없으면 에러 처리
+  if (!login_event_id || domain_salt === null || run_sandbox === null) {
+    console.error('[Site-A] Missing required PCF headers from backend');
+    return res.status(500).send('Invalid PCF evaluate_login response (headers)');
+  }
 
-  // 🔸 더 이상 아래 헤더들은 보내지 않음:
-  // res.set('X-PCF-Login-Event-Id', String(login_event_id));
-  // res.set('X-PCF-Domain-Salt', String(domain_salt));
-  // res.set('X-PCF-Domain', domain);
+  // ---------- (A) PCF 헤더를 그대로 브라우저 응답 헤더로 복사 ----------
+  // 여기서는 "재구성 없이" 그대로 전달한다는 컨셉으로,
+  // 이름/값을 그냥 그대로 세팅한다.
+  res.set('X-PCF-Login-Event-Id', login_event_id);
+  res.set('X-PCF-Domain-Salt', domain_salt);
+  res.set('X-PCF-Run-Sandbox', run_sandbox);
 
-  // ---------- (B) 페이지 PCF_CONTEXT ----------
-  // domain 없음
+  // ---------- (B) 로그인 성공 HTML 본문 ----------
+  // PCF_CONTEXT 스크립트는 제거하고, 단순한 UI만 렌더링.
+  // 샌드박스에 필요한 값들은 전부 헤더에 있으므로,
+  // 확장(background + content)이 헤더/메시지로 처리한다.
   const html = `
     <html>
       <head><title>Site A</title></head>
       <body>
         <h1>Welcome, ${username}!</h1>
-
-        <script>
-          (function() {
-            const pcfContext = {
-              login_event_id: ${JSON.stringify(login_event_id)},
-              run_sandbox: ${JSON.stringify(runSandboxBool)},
-              domain_salt: ${JSON.stringify(domain_salt)}
-            };
-
-            console.log("Page PCF_CONTEXT:", pcfContext);
-
-            // HELLO 받으면 CONTEXT 전송
-            window.addEventListener("message", function(ev) {
-              if (ev.source !== window) return;
-              if (!ev.data || ev.data.type !== "PCF_EXTENSION_HELLO") return;
-
-              console.log("HELLO → send PCF_CONTEXT");
-              window.postMessage({ type: "PCF_CONTEXT", pcf: pcfContext }, "*");
-            });
-
-            // 확장이 늦게 붙을 경우 대비: 1초 뒤에도 한 번 더 전송
-            setTimeout(() => {
-              console.log("proactive PCF_CONTEXT");
-              window.postMessage({ type: "PCF_CONTEXT", pcf: pcfContext }, "*");
-            }, 1000);
-          })();
-        </script>
+        <p>로그인 성공 (PCF 샌드박스는 브라우저 확장이 백그라운드/컨텐트에서 처리)</p>
       </body>
     </html>
   `;
