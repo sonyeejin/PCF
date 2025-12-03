@@ -1,7 +1,7 @@
 // content.js
 
 // -----------------------
-// 전역 컨텍스트 저장용
+// 전역 컨텍스트 저장용 (페이지 PCF_CONTEXT만 사용)
 // -----------------------
 let pcfContext = null;
 
@@ -13,7 +13,7 @@ async function sha256Hex(text) {
   const data = encoder.encode(text);
   const hashBuffer = await crypto.subtle.digest('SHA-256', data);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 // -----------------------
@@ -49,7 +49,7 @@ function buildRawFingerprint() {
 
   const touch = {
     hasTouch:
-      "ontouchstart" in window || (navigator.maxTouchPoints || 0) > 0,
+      'ontouchstart' in window || (navigator.maxTouchPoints || 0) > 0,
     maxTouchPoints: navigator.maxTouchPoints || 0,
   };
 
@@ -57,7 +57,7 @@ function buildRawFingerprint() {
     doNotTrack: navigator.doNotTrack || null,
   };
 
-  // storage 지원 여부만 간단 체크 (실제 용량/쓰기 테스트는 생략)
+  // storage 지원 여부만 간단 체크
   const storage = {
     localStorage: (() => {
       try {
@@ -73,10 +73,10 @@ function buildRawFingerprint() {
         return false;
       }
     })(),
-    indexedDB: typeof indexedDB !== "undefined",
+    indexedDB: typeof indexedDB !== 'undefined',
   };
 
-  // permissions API는 비동기라 여기서는 존재 여부만
+  // permissions API 존재 여부만
   const permissions = {
     hasPermissionsApi: !!(navigator.permissions && navigator.permissions.query),
   };
@@ -84,35 +84,31 @@ function buildRawFingerprint() {
   const mediaDevices = {
     hasMediaDevices:
       !!(navigator.mediaDevices && navigator.mediaDevices.enumerateDevices),
-    deviceCount: null, // 실제 개수는 비동기라 여기선 생략
+    deviceCount: null,
   };
 
   // 간단 WebGL 지원 여부
   let webglSupported = false;
   try {
-    const canvas = document.createElement("canvas");
+    const canvas = document.createElement('canvas');
     const gl =
-      canvas.getContext("webgl") ||
-      canvas.getContext("experimental-webgl");
+      canvas.getContext('webgl') ||
+      canvas.getContext('experimental-webgl');
     webglSupported = !!gl;
   } catch (e) {
     webglSupported = false;
   }
-  const webgl = {
-    supported: webglSupported,
-  };
+  const webgl = { supported: webglSupported };
 
-  // Canvas 렌더링 지원 여부만 체크 
+  // Canvas 렌더링 지원 여부만 체크
   let canvasSupported = false;
   try {
-    const canvasEl = document.createElement("canvas");
-    canvasSupported = !!canvasEl.getContext("2d");
+    const canvasEl = document.createElement('canvas');
+    canvasSupported = !!canvasEl.getContext('2d');
   } catch (e) {
     canvasSupported = false;
   }
-  const canvas = {
-    supported: canvasSupported,
-  };
+  const canvas = { supported: canvasSupported };
 
   const audio = {
     hasOfflineAudioContext: !!(
@@ -120,11 +116,8 @@ function buildRawFingerprint() {
     ),
   };
 
-  // 실제 폰트 fingerprinting은 복잡하니 placeholder만
-  const fonts = {
-    // TODO: 필요하면 테스트 문자열 기반 폰트 설치 여부 측정 로직 추가
-    placeholder: true,
-  };
+  // 실제 폰트 fingerprinting 은 placeholder
+  const fonts = { placeholder: true };
 
   return {
     browser,
@@ -237,17 +230,17 @@ function computeLocalClassification(raw_fp, security_signal) {
     trust_score -= 5;
   }
 
-  // 언어 정보가 비어있으면 비정상 환경으로 감점
+  // 언어 정보 없음 → 감점
   if (!languages || languages.length === 0) {
     trust_score -= 10;
   }
 
-  // DNT 켜져 있으면 약간 감점 (프라이버시 강한 설정)
+  // DNT 켜져 있으면 약간 감점
   if (doNotTrack === '1') {
     trust_score -= 5;
   }
 
-  // webdriver 감지 → 강한 봇 신호
+  // webdriver 감지 → 봇 강한 신호
   if (navigator.webdriver) {
     trust_score -= 40;
   }
@@ -255,7 +248,6 @@ function computeLocalClassification(raw_fp, security_signal) {
   if (trust_score < 0) trust_score = 0;
   if (trust_score > 100) trust_score = 100;
 
-  // 일정 이하 점수이거나 webdriver면 is_bot=true
   if (trust_score <= 30 || navigator.webdriver) {
     is_bot = true;
   }
@@ -264,10 +256,15 @@ function computeLocalClassification(raw_fp, security_signal) {
 }
 
 // -----------------------
-// 5. 샌드박스 실행 (PCF 컨텍스트 필요)
+// 5. 샌드박스 실행 (PCF_CONTEXT만 사용)
+//    ⚠ 헤더(X-PCF-Run-Sandbox)는 background에서만 사용하고,
+//      content.js는 오직 pcfContext.run_sandbox 로만 실행 여부 체크
 // -----------------------
 async function runSandboxIfNeeded() {
-  console.log('[PCF Extension] content.js runSandboxIfNeeded on', window.location.href);
+  console.log(
+    '[PCF Extension] content.js runSandboxIfNeeded on',
+    window.location.href
+  );
 
   const ctx = pcfContext;
   if (!ctx) {
@@ -285,7 +282,6 @@ async function runSandboxIfNeeded() {
   const raw_fp = buildRawFingerprint();
   console.log('[PCF Extension] raw_fp:', raw_fp);
 
-  
   // safe_fp = SHA-256(JSON.stringify(raw_fp) + domain_salt)
   const rawString = JSON.stringify(raw_fp);
   const domainSalt = String(ctx.domain_salt || '');
@@ -293,10 +289,12 @@ async function runSandboxIfNeeded() {
   const safe_fp = await sha256Hex(hashInput);
 
   const security_signal = buildSecuritySignal(raw_fp);
-  const local_classification = computeLocalClassification(raw_fp, security_signal);
+  const local_classification = computeLocalClassification(
+    raw_fp,
+    security_signal
+  );
 
   // /report_fp로 보낼 payload
-  // - login_event_id, safe_fp, security_signal, local_classification
   const payload = {
     login_event_id: ctx.login_event_id,
     safe_fp,
@@ -327,6 +325,7 @@ async function runSandboxIfNeeded() {
 
 // -----------------------
 // 6. 페이지 → content.js 메시지 수신
+//    (페이지가 보낸 PCF_CONTEXT만 사용)
 // -----------------------
 window.addEventListener('message', (event) => {
   // 같은 페이지에서 온 메시지만 처리
@@ -343,12 +342,12 @@ window.addEventListener('message', (event) => {
 });
 
 // -----------------------
-// 7. 로딩 로그
+// 7. 로딩 로그 + HELLO (PCF_CONTEXT 요청)
 // -----------------------
 console.log('[PCF Extension] content.js loaded on', window.location.href);
 
-// 8. 페이지에 "나 준비됨" 신호 보내기
 try {
+  // 페이지에게 "PCF_CONTEXT 있으면 보내라"는 신호
   window.postMessage(
     { type: 'PCF_EXTENSION_HELLO' },
     '*'
