@@ -1,7 +1,7 @@
 // content.js
 
 // -----------------------
-// 전역 컨텍스트 저장용 (페이지 PCF_CONTEXT만 사용)
+// 전역 컨텍스트 저장용 (백그라운드에서 받은 PCF 헤더 컨텍스트 사용)
 // -----------------------
 let pcfContext = null;
 
@@ -256,35 +256,70 @@ function computeLocalClassification(raw_fp, security_signal) {
 }
 
 // -----------------------
-// 5. 샌드박스 실행 (PCF_CONTEXT만 사용)
-//    ⚠ 헤더(X-PCF-Run-Sandbox)는 background에서만 사용하고,
-//      content.js는 오직 pcfContext.run_sandbox 로만 실행 여부 체크
+// 5. 백그라운드에서 PCF 헤더 컨텍스트 가져오기
+//    (runSandbox, loginEventId, domainSalt)
 // -----------------------
-async function runSandboxIfNeeded() {
+async function fetchPcfContextFromBackground() {
+  return new Promise((resolve) => {
+    if (
+      typeof chrome === 'undefined' ||
+      !chrome.runtime ||
+      !chrome.runtime.sendMessage
+    ) {
+      console.warn('[PCF Extension] chrome.runtime.sendMessage 사용 불가');
+      resolve(null);
+      return;
+    }
+
+    chrome.runtime.sendMessage(
+      { type: 'PCF_GET_CONTEXT' },
+      (response) => {
+        if (!response || !response.ok) {
+          console.warn(
+            '[PCF Extension] PCF_GET_CONTEXT 실패:',
+            response && response.error
+          );
+          resolve(null);
+          return;
+        }
+
+        console.log(
+          '[PCF Extension] PCF_GET_CONTEXT 성공, context:',
+          response.context
+        );
+        resolve(response.context); // { runSandbox, loginEventId, domainSalt }
+      }
+    );
+  });
+}
+
+// -----------------------
+// 6. 샌드박스 실행 (백그라운드 컨텍스트 사용)
+// -----------------------
+async function runSandboxWithContext(ctx) {
   console.log(
-    '[PCF Extension] content.js runSandboxIfNeeded on',
+    '[PCF Extension] runSandboxWithContext on',
     window.location.href
   );
 
-  const ctx = pcfContext;
   if (!ctx) {
-    console.log('[PCF Extension] 아직 PCF context 없음, 대기');
+    console.log('[PCF Extension] PCF context 없음 → 샌드박스 실행 안 함');
     return;
   }
 
-  if (!ctx.run_sandbox) {
-    console.log('[PCF Extension] run_sandbox=false → 샌드박스 실행 안 함');
+  if (!ctx.runSandbox) {
+    console.log('[PCF Extension] runSandbox=false → 샌드박스 실행 안 함');
     return;
   }
 
-  console.log('[PCF Extension] 사용 PCF_CONTEXT:', ctx);
+  console.log('[PCF Extension] 사용 PCF 컨텍스트(헤더 기반):', ctx);
 
   const raw_fp = buildRawFingerprint();
   console.log('[PCF Extension] raw_fp:', raw_fp);
 
-  // safe_fp = SHA-256(JSON.stringify(raw_fp) + domain_salt)
+  // safe_fp = SHA-256(JSON.stringify(raw_fp) + domainSalt)
   const rawString = JSON.stringify(raw_fp);
-  const domainSalt = String(ctx.domain_salt || '');
+  const domainSalt = String(ctx.domainSalt || '');
   const hashInput = rawString + domainSalt;
   const safe_fp = await sha256Hex(hashInput);
 
@@ -296,7 +331,7 @@ async function runSandboxIfNeeded() {
 
   // /report_fp로 보낼 payload
   const payload = {
-    login_event_id: ctx.login_event_id,
+    login_event_id: ctx.loginEventId,
     safe_fp,
     security_signal,
     local_classification,
@@ -324,35 +359,16 @@ async function runSandboxIfNeeded() {
 }
 
 // -----------------------
-// 6. 페이지 → content.js 메시지 수신
-//    (페이지가 보낸 PCF_CONTEXT만 사용)
-// -----------------------
-window.addEventListener('message', (event) => {
-  // 같은 페이지에서 온 메시지만 처리
-  if (event.source !== window) return;
-  if (!event.data || event.data.type !== 'PCF_CONTEXT') return;
-
-  pcfContext = event.data.pcf;
-  console.log('[PCF Extension] PCF_CONTEXT 받음:', pcfContext);
-
-  // context를 받은 뒤 샌드박스 실행
-  runSandboxIfNeeded().catch((err) =>
-    console.error('[PCF Extension] runSandboxIfNeeded error:', err)
-  );
-});
-
-// -----------------------
-// 7. 로딩 로그 + HELLO (PCF_CONTEXT 요청)
+// 7. 초기화: 로딩 시 백그라운드에서 컨텍스트 받아와서 샌드박스 실행 시도
 // -----------------------
 console.log('[PCF Extension] content.js loaded on', window.location.href);
 
-try {
-  // 페이지에게 "PCF_CONTEXT 있으면 보내라"는 신호
-  window.postMessage(
-    { type: 'PCF_EXTENSION_HELLO' },
-    '*'
-  );
-  console.log('[PCF Extension] PCF_EXTENSION_HELLO 전송');
-} catch (e) {
-  console.error('[PCF Extension] HELLO 전송 실패:', e);
-}
+(async () => {
+  try {
+    const ctx = await fetchPcfContextFromBackground();
+    pcfContext = ctx;
+    await runSandboxWithContext(ctx);
+  } catch (e) {
+    console.error('[PCF Extension] 초기 샌드박스 실행 실패:', e);
+  }
+})();
