@@ -2,6 +2,18 @@
 
 const express = require('express');
 
+// 🔐 .env에서 비밀키 읽기 (.env에 PCF_TOKEN_SECRET 설정 필요)
+require('dotenv').config();
+
+// 🔐 토큰화 모듈 (pcf-tokenizer를 npm으로 설치했다고 가정)
+const { createTokenizer } = require('pcf-tokenizer');
+
+// 🔐 토큰 생성기 인스턴스
+const tokenizer = createTokenizer({
+  secret: process.env.PCF_TOKEN_SECRET, // 고객사 서버에만 있는 비밀키
+  prefix: 'pcf_',                       // 선택: 토큰 앞에 붙는 문자열
+});
+
 const app = express();
 const PORT = 4000;                            // Site A 서버 포트
 const PCF_BASE_URL = 'http://localhost:3000'; // PCF 백엔드 주소
@@ -51,7 +63,7 @@ app.get('/login', (req, res) => {
  *  - 로그인 성공 후 PCF /evaluate_login 호출
  *  - 보고서 스펙대로 user_token, domain, login_ip 만 전달
  *  - PCF 백엔드는 login_event_id, domain_salt, run_sandbox 를
- *    전부 응답 헤더(X-PCF-*)에 넣어서 돌려줌 (JSON 바디는 옵션)
+ *    전부 응답 헤더(X-PCF-*)에 넣어서 돌려줌
  *  - 이 서비스 서버는 그 헤더들을 "재구성 없이" 그대로 복사해서
  *    브라우저 응답 헤더로 전달
  *  - HTML 본문은 단순 로그인 성공 페이지만 내려보냄
@@ -63,7 +75,10 @@ app.post('/login', async (req, res) => {
     return res.status(400).send('username is required');
   }
 
-  const user_token = `user-${username}`;
+  // 🔐 기존: const user_token = `user-${username}`;
+  // 🔐 수정: 실제 username을 토큰화해서 PCF에만 전달
+  const user_token = tokenizer.tokenize(username);
+
   const domain = SITE_DOMAIN;
   const login_ip = req.ip || '127.0.0.1';
 
@@ -102,7 +117,6 @@ app.post('/login', async (req, res) => {
   const domain_salt    = pcfHeaders.get('X-PCF-Domain-Salt');
   const run_sandbox    = pcfHeaders.get('X-PCF-Run-Sandbox');
 
-
   console.log('[Site-A] PCF headers from backend:', {
     login_event_id,
     domain_salt,
@@ -116,22 +130,17 @@ app.post('/login', async (req, res) => {
   }
 
   // ---------- (A) PCF 헤더를 그대로 브라우저 응답 헤더로 복사 ----------
-  // 여기서는 "재구성 없이" 그대로 전달한다는 컨셉으로,
-  // 이름/값을 그냥 그대로 세팅한다.
   res.set('X-PCF-Login-Event-Id', login_event_id);
   res.set('X-PCF-Domain-Salt', domain_salt);
   res.set('X-PCF-Run-Sandbox', run_sandbox);
 
   // ---------- (B) 로그인 성공 HTML 본문 ----------
-  // PCF_CONTEXT 스크립트는 제거하고, 단순한 UI만 렌더링.
-  // 샌드박스에 필요한 값들은 전부 헤더에 있으므로,
-  // 확장(background + content)이 헤더/메시지로 처리한다.
   const html = `
     <html>
       <head><title>Site A</title></head>
       <body>
         <h1>Welcome, ${username}!</h1>
-        <p>로그인 성공 (PCF 샌드박스는 브라우저 확장이 백그라운드/컨텐트에서 처리)</p>
+        <p>로그인 성공 </p>
       </body>
     </html>
   `;
