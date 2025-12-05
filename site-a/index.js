@@ -148,6 +148,31 @@ app.post('/login', async (req, res) => {
   return res.send(html);
 });
 
+// pcf 백엔드로 부터 최종 결과 수신
+app.post('/pcf_result', (req, res) => {
+  const {
+    login_event_id,
+    risk_score,
+    security_flags,
+    user_token,
+    domain
+  } = req.body || {};
+
+  console.log('[Site-A] PCF 최종 결과 수신:', {
+    login_event_id,
+    risk_score,
+    security_flags,
+    user_token,
+    domain
+  });
+
+  // 여기서 risk_score 기준으로 승인/거부 결정하는 로직 필요하면 넣으면 됨
+  // 일단은 200 OK만 보내는 걸로 
+  return res.json({ ok: true });
+});
+
+// 🔼 이 위까지 추가
+
 app.listen(PORT, () => {
   console.log(`Site A server running at http://localhost:${PORT}`);
 });
