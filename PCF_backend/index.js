@@ -1,5 +1,8 @@
 // index.js
-
+const SERVICE_SERVER_URLS = {
+  'a.com': 'http://localhost:4000', //site A
+  'b.com': 'http://localhost:4001',  // site B
+};
 const express = require('express');
 const crypto = require('crypto');
 const geoip = require('geoip-lite'); // 🔹 국가 판별용
@@ -55,7 +58,6 @@ function getOrCreateDomain(domainName) {
   console.log('[PCF] new domain registered:', record);
   return record;
 }
-
 /**
  * 2단계: /evaluate_login 구현
  *  - 서비스 서버가 로그인 시점에 호출한다고 가정
@@ -105,7 +107,7 @@ app.post('/evaluate_login', (req, res) => {
   //    - X-PCF-Login-Event-ID : login_event_id
   //    - X-PCF-Domain-Salt    : 도메인별 salt
   res.set('X-PCF-Run-Sandbox', '1');
-  res.set('X-PCF-Login-Event-ID', login_event_id);
+  res.set('X-PCF-Login-Event-Id', login_event_id);
   res.set('X-PCF-Domain-Salt', domainRecord.domain_salt);
 
   // 5) 바디에는 아무 민감 정보도 넣지 않음 (204 No Content)
@@ -234,14 +236,14 @@ app.post('/report_fp', (req, res) => {
     loginEvent.login_ip
   );
 
-  // 🔹 5-1) 같은 디바이스(safe_fp)에서 여러 계정 시도 여부 (최근 5분)
+  // 5-1) 같은 디바이스(safe_fp)에서 여러 계정 시도 여부 (최근 5분)
   const multiFpStats = getFpMultiAccountStats(
     domainRecord.id,
     safe_fp,
     now
   );
 
-  // 🔹 5-2) 국가/지역 변화 정보 (현재 이벤트 제외하고 과거만 봄)
+  // 5-2) 국가/지역 변화 정보 (현재 이벤트 제외하고 과거만 봄)
   const geoStats = getUserCountryStats(
     loginEvent.user_token,
     domainRecord.id,
@@ -258,28 +260,25 @@ app.post('/report_fp', (req, res) => {
     geo: geoStats,
   });
 
-  // 7) 서비스 서버에 보낼 payload 콘솔로 확인하기 (실제 HTTP 호출은 나중에)
+  // 7) 서비스 서버에 보낼 payload 
   const notifyPayload = {
     login_event_id,
     user_token: loginEvent.user_token,
     domain: domainRecord.domain_name,
     risk_score,
-    security_flags: vulnFlags,
-    reason: {
-      base: 'local_classification + history + velocity + ip_profile + geo + multi_fp',
-      debug: {
-        local_classification,
-        historyStats,
-        velocityStats,
-        ipStats,
-        multiFpStats,
-        geoStats,
-      },
-    },
+    security_flags: vulnFlags
   };
 
-  notifyServiceServerSimulated(notifyPayload);
+// 도메인에 맞는 서비스 서버 URL 고르기
+const serviceUrl = SERVICE_SERVER_URLS[domainRecord.domain_name];
 
+if (serviceUrl) {
+  notifyServiceServer(serviceUrl, notifyPayload).catch((err) => {
+    console.error('[PCF] notifyServiceServer error:', err);
+  });
+} else {
+  console.warn('[PCF] 알 수 없는 도메인, 서비스 서버 URL 매핑 없음:', domainRecord.domain_name);
+}
   // 8) 클라이언트(브라우저 확장)에게 응답
   return res.json({
     ok: true,
@@ -455,7 +454,6 @@ function getUserCountryStats(user_token, domain_id, currentCountry, currentLogin
     isNewCountry,
   };
 }
-
 /**
  * security_signal을 보고 취약점 플래그 요약
  * - outdated_browser : 브라우저 메이저 버전이 너무 낮음 (Chrome 전제)
@@ -536,7 +534,6 @@ function analyzeSecuritySignal(security_signal) {
       }
     }
   }
-
   // -----------------------------
   // 3) 에이전트 버전 (security_version)
   // -----------------------------
@@ -553,7 +550,6 @@ function analyzeSecuritySignal(security_signal) {
 
   return flags;
 }
-
 /**
  * local_classification + 사용자 히스토리 + 로그인 속도 + IP 일관성 +
  * 같은 디바이스 multi-account + 국가/지역 변화를 모두 고려해서
@@ -634,15 +630,23 @@ function calculateRiskScore(localClassification, stats) {
   return score;
 }
 
-// 실제 /notify_sandbox_result HTTP 호출 대신 콘솔에만 찍는 함수
-function notifyServiceServerSimulated(payload) {
-  console.log('\n[PCF] === notify_to_service_server (SIMULATION) ===');
-  console.log(JSON.stringify(payload, null, 2));
-  console.log('[PCF] ===========================================\n');
+// 서비스 서버에 최종 결과를 보내는 함수
+async function notifyServiceServer(baseUrl, payload) {
+  try {
+    const resp = await fetch(`${baseUrl}/pcf_result`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    const text = await resp.text().catch(() => '(no body)');
+
+    console.log('[PCF] notify_to_service_server status:', resp.status);
+    console.log('[PCF] notify_to_service_server body:', text);
+  } catch (err) {
+    console.error('[PCF] notify_to_service_server failed:', err);
+  }
 }
-
-
-
 // ------------------------------
 // 🔍 디버그용 조회 API
 // ------------------------------
